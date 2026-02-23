@@ -1,0 +1,31 @@
+{
+  "lol": {
+    "T1": ["T1", "SKT", "SK Telecom", "SKT T1"],
+    "Gen.G": ["Gen.G", "GenG", "Gen G"],
+    "DRX": ["DRX", "DragonX"],
+    "Cloud9": ["Cloud9", "C9"],
+    "G2": ["G2", "G2 Esports"]
+  },
+  "dota2": {
+    "Team Spirit": ["Team Spirit", "Spirit"],
+    "OG": ["OG"],
+    "Team Liquid": ["Team Liquid", "Liquid"],
+    "PSG.LGD": ["PSG.LGD", "LGD"]
+  },
+  "cs2": {
+    "Natus Vincere": ["Natus Vincere", "NAVI", "NaVi"],
+    "FaZe Clan": ["FaZe Clan", "FaZe"],
+    "G2": ["G2", "G2 Esports"],
+    "Vitality": ["Vitality", "Team Vitality"]
+  },
+  "nba": {
+    "LAL": ["Lakers", "Los Angeles Lakers", "LA Lakers"],
+    "BOS": ["Celtics", "Boston Celtics", "Boston"],
+    "GSW": ["Warriors", "Golden State Warriors", "Golden State"],
+    "MIL": ["Bucks", "Milwaukee Bucks", "Milwaukee"],
+    "DEN": ["Nuggets", "Denver Nuggets", "Denver"],
+    "PHX": ["Suns", "Phoenix Suns", "Phoenix"],
+    "MIA": ["Heat", "Miami Heat", "Miami"],
+    "NYK": ["Knicks", "New York Knicks", "New York"]
+  }
+}
