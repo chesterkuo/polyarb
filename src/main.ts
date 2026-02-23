@@ -192,7 +192,7 @@ async function main() {
 
             // Fetch frames and diff
             try {
-              const frames = await pandascore.getMatchFrames(match.id);
+              const frames = await pandascore.getMatchFrames(match.id, game);
               if (frames.length === 0) continue;
 
               const latestFrame = frames[frames.length - 1];

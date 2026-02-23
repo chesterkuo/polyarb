@@ -9,7 +9,17 @@
   "peerDependencies": {
     "typescript": "^5"
   },
+  "scripts": {
+    "start": "bun run src/main.ts",
+    "pm2:start": "pm2 start ecosystem.config.cjs",
+    "pm2:prod": "pm2 start ecosystem.config.cjs --env production",
+    "pm2:stop": "pm2 stop polyarb",
+    "pm2:restart": "pm2 restart polyarb",
+    "pm2:logs": "pm2 logs polyarb",
+    "pm2:status": "pm2 status"
+  },
   "dependencies": {
+    "pm2": "^6.0.14",
     "viem": "^2.46.2"
   }
 }

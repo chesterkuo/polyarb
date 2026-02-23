@@ -33,8 +33,10 @@ export class PandaScoreClient implements EsportsDataProvider {
   async getLiveMatches(game: Game): Promise<LiveMatch[]> {
     const slug = GAME_SLUGS[game];
     const res = await fetchWithRetry(`${this.baseUrl}/${slug}/matches/running`, { headers: this.headers });
-    const data = (await res.json()) as PandaMatch[];
-    return data.map((m) => ({
+    if (!res.ok) return [];
+    const data = await res.json();
+    if (!Array.isArray(data)) return [];
+    return (data as PandaMatch[]).map((m) => ({
       id: String(m.id), game,
       team1: m.opponents[0]?.opponent?.name ?? 'Unknown',
       team2: m.opponents[1]?.opponent?.name ?? 'Unknown',
@@ -43,10 +45,18 @@ export class PandaScoreClient implements EsportsDataProvider {
     }));
   }
 
-  async getMatchFrames(gameId: string): Promise<GameFrame[]> {
-    const res = await fetchWithRetry(`${this.baseUrl}/lol/games/${gameId}/frames`, { headers: this.headers });
-    const data = (await res.json()) as PandaFrame[];
-    return data.map((f) => ({
+  async getMatchFrames(matchId: string, game: Game = 'lol'): Promise<GameFrame[]> {
+    const slug = GAME_SLUGS[game];
+    // PandaScore: match → games → frames. First get the running game ID.
+    const matchRes = await fetchWithRetry(`${this.baseUrl}/${slug}/matches/${matchId}`, { headers: this.headers });
+    const match = (await matchRes.json()) as PandaMatch;
+    const runningGame = match.games?.find((g) => g.status === 'running');
+    if (!runningGame) return [];
+
+    const res = await fetchWithRetry(`${this.baseUrl}/${slug}/games/${runningGame.id}/frames`, { headers: this.headers });
+    const data = await res.json();
+    const frames = Array.isArray(data) ? data as PandaFrame[] : (data as any).frames as PandaFrame[] ?? [];
+    return frames.map((f) => ({
       timestamp: f.timestamp, gameTimeSeconds: 0,
       teams: [this.toTeamFrame(f.teams[0]), this.toTeamFrame(f.teams[1])] as [TeamFrame, TeamFrame],
     }));
