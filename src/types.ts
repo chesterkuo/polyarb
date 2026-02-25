@@ -1,5 +1,5 @@
 export type Side = 'YES' | 'NO';
-export type Sport = 'lol' | 'dota2' | 'cs2' | 'nba';
+export type Sport = 'lol' | 'dota2' | 'cs2' | 'nba' | 'ncaab' | 'nhl';
 export type Game = 'lol' | 'dota2' | 'cs2';
 
 export interface Market {
@@ -79,6 +79,16 @@ export interface GameFrame {
   timestamp: number;
   gameTimeSeconds: number;
   teams: [TeamFrame, TeamFrame];
+}
+
+export interface SportGame {
+  id: string;
+  sport: Sport;
+  homeTeam: { name: string; abbreviation: string; score: number };
+  awayTeam: { name: string; abbreviation: string; score: number };
+  period: number;
+  clock: string;
+  status: 'scheduled' | 'in_progress' | 'final';
 }
 
 export type GameEventType =

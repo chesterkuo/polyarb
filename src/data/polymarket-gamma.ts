@@ -1,10 +1,10 @@
-import type { Market } from '../types';
+import type { Market, Sport } from '../types';
 import { CONFIG } from '../config';
 import { fetchWithRetry } from '../utils/fetch-retry';
 
 interface GammaMarketRaw {
   id: string; conditionId: string; question: string;
-  clobTokenIds: string[]; outcomePrices: string[];
+  clobTokenIds: string[] | string; outcomePrices: string[] | string;
   active: boolean; closed: boolean; acceptingOrders: boolean;
   negRisk: boolean;
 }
@@ -16,6 +16,8 @@ interface GammaEvent {
 
 const ESPORTS_PREFIXES = ['lol:', 'dota 2:', 'cs2:', 'cs:', 'valorant:', 'counter-strike:', 'honor of kings:'];
 const NBA_KEYWORDS = ['nba'];
+const NCAAB_KEYWORDS = ['ncaa', 'ncaab', 'march madness', 'college basketball'];
+const NHL_KEYWORDS = ['nhl', 'hockey'];
 
 function isEsportsEvent(title: string): boolean {
   const t = title.toLowerCase().trim();
@@ -27,12 +29,30 @@ function isNbaEvent(title: string): boolean {
   return NBA_KEYWORDS.some((k) => t.includes(k));
 }
 
-function toMarket(m: GammaMarketRaw): Market {
+function isNcaabEvent(title: string): boolean {
+  const t = title.toLowerCase();
+  return NCAAB_KEYWORDS.some((k) => t.includes(k));
+}
+
+function isNhlEvent(title: string): boolean {
+  const t = title.toLowerCase();
+  return NHL_KEYWORDS.some((k) => t.includes(k));
+}
+
+function parseJsonArray(val: string[] | string): string[] {
+  if (Array.isArray(val)) return val;
+  try { return JSON.parse(val); } catch { return []; }
+}
+
+function toMarket(m: GammaMarketRaw, sport?: Sport): Market {
+  const tokenIds = parseJsonArray(m.clobTokenIds);
+  const prices = parseJsonArray(m.outcomePrices);
   return {
     id: m.id, conditionId: m.conditionId, question: m.question,
-    yesTokenId: m.clobTokenIds[0], noTokenId: m.clobTokenIds[1],
-    yesPrice: parseFloat(m.outcomePrices[0]), noPrice: parseFloat(m.outcomePrices[1]),
+    yesTokenId: tokenIds[0] ?? '', noTokenId: tokenIds[1] ?? '',
+    yesPrice: parseFloat(prices[0]) || 0, noPrice: parseFloat(prices[1]) || 0,
     negRisk: m.negRisk ?? false, tickSize: 0.01,
+    sport,
   };
 }
 
@@ -41,7 +61,6 @@ export class GammaScanner {
   private cacheTime = 0;
 
   private async fetchAllEvents(): Promise<GammaEvent[]> {
-    // Cache for 30s to avoid double-fetching when getEsportsMarkets + getNbaMarkets called together
     if (Date.now() - this.cacheTime < 30_000 && this.cachedEvents.length > 0) {
       return this.cachedEvents;
     }
@@ -60,13 +79,13 @@ export class GammaScanner {
     return all;
   }
 
-  private extractMarkets(events: GammaEvent[], filter: (title: string) => boolean): Market[] {
+  private extractMarkets(events: GammaEvent[], filter: (title: string) => boolean, sport?: Sport): Market[] {
     const markets: Market[] = [];
     for (const event of events) {
       if (!filter(event.title)) continue;
       for (const m of event.markets ?? []) {
         if (m.active && m.acceptingOrders && !m.closed) {
-          markets.push(toMarket(m));
+          markets.push(toMarket(m, sport));
         }
       }
     }
@@ -80,6 +99,16 @@ export class GammaScanner {
 
   async getNbaMarkets(): Promise<Market[]> {
     const events = await this.fetchAllEvents();
-    return this.extractMarkets(events, isNbaEvent);
+    return this.extractMarkets(events, isNbaEvent, 'nba');
+  }
+
+  async getNcaabMarkets(): Promise<Market[]> {
+    const events = await this.fetchAllEvents();
+    return this.extractMarkets(events, isNcaabEvent, 'ncaab');
+  }
+
+  async getNhlMarkets(): Promise<Market[]> {
+    const events = await this.fetchAllEvents();
+    return this.extractMarkets(events, isNhlEvent, 'nhl');
   }
 }

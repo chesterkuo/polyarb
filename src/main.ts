@@ -1,6 +1,6 @@
 import { privateKeyToAccount } from 'viem/accounts';
 import { CONFIG } from './config';
-import type { Game, GameFrame, Market, LiveMatch, ArbOpportunity, OpenPosition, Signal } from './types';
+import type { Game, GameFrame, Market, LiveMatch, ArbOpportunity, OpenPosition, Signal, SportGame } from './types';
 
 // Monitoring
 import { DbLogger } from './monitoring/db';
@@ -12,12 +12,15 @@ import { GammaScanner } from './data/polymarket-gamma';
 import { WsListener } from './data/polymarket-ws';
 import { PandaScoreClient } from './data/esports/pandascore-client';
 import { diffFrames } from './data/esports/frame-differ';
-import { NbaLiveClient } from './data/nba/balldontlie';
+import { EspnClient } from './data/espn/espn-client';
+import { NhlClient } from './data/nhl/nhl-client';
 import { PinnacleClient } from './data/pinnacle-client';
 import { MarketMatcher } from './data/market-matcher';
 
 // Signals
 import { computeEsportsWinProb } from './signals/wp-models/esports-wp';
+import { calcNbaWinProb, calcNcaabWinProb } from './signals/wp-models/nba-wp';
+import { calcNhlWinProb } from './signals/wp-models/nhl-wp';
 
 // Decision engine
 import { ArbDetector } from './arbitrage/detector';
@@ -56,7 +59,8 @@ async function main() {
   ws.connect();
 
   const pandascore = new PandaScoreClient(CONFIG.pandascoreKey);
-  const nbaClient = new NbaLiveClient();
+  const espn = new EspnClient();
+  const nhlClient = new NhlClient();
   const pinnacle = new PinnacleClient();
   const matcher = new MarketMatcher(
     teamNamesData as any,
@@ -98,6 +102,8 @@ async function main() {
   // -----------------------------------------------------------------------
   let esportsMarkets: Market[] = [];
   let nbaMarkets: Market[] = [];
+  let ncaabMarkets: Market[] = [];
+  let nhlMarkets: Market[] = [];
   const lastFrames = new Map<string, GameFrame>();
 
   // -----------------------------------------------------------------------
@@ -145,26 +151,76 @@ async function main() {
   }
 
   // -----------------------------------------------------------------------
+  // Helper: process a sport game signal against markets
+  // -----------------------------------------------------------------------
+  function matchGameToMarket(game: SportGame, markets: Market[]): Market | undefined {
+    return markets.find((m) => {
+      const liveMatch: LiveMatch = {
+        id: game.id,
+        game: 'lol' as Game, // MarketMatcher detects sport from question text or market.sport
+        team1: game.homeTeam.abbreviation,
+        team2: game.awayTeam.abbreviation,
+        status: 'running',
+      };
+      return matcher.match(m, [liveMatch]) === liveMatch.id;
+    });
+  }
+
+  function updateMarketPrices(market: Market): void {
+    const wsYes = ws.getLatestPrice(market.yesTokenId);
+    const wsNo = ws.getLatestPrice(market.noTokenId);
+    if (wsYes > 0) market.yesPrice = wsYes;
+    if (wsNo > 0) market.noPrice = wsNo;
+  }
+
+  async function processSignal(market: Market, signal: Signal): Promise<void> {
+    db.logSignal(market.id, signal, market.yesPrice);
+    const opp = detector.detect(market, signal);
+    if (!opp) return;
+    if (!riskGuard.allow(opp)) {
+      console.log(`[Risk] Blocked trade on "${market.question}" | edge=${(opp.edge * 100).toFixed(1)}%`);
+      return;
+    }
+    await executeOpportunity(opp);
+  }
+
+  function blendSignals(primary: Signal, secondary: Signal): Signal {
+    const totalConf = primary.confidence + secondary.confidence;
+    return {
+      trueProb:
+        (primary.trueProb * primary.confidence +
+          secondary.trueProb * secondary.confidence) / totalConf,
+      confidence: Math.min(0.95, (primary.confidence + secondary.confidence) / 2 + 0.05),
+      source: `${primary.source}+${secondary.source}`,
+      timestamp: Date.now(),
+    };
+  }
+
+  // -----------------------------------------------------------------------
   // 6a. Gamma scanner loop — refresh markets & subscribe to WS prices
   // -----------------------------------------------------------------------
   async function gammaScanLoop(): Promise<void> {
     while (running) {
       try {
-        const [eMarkets, nMarkets] = await Promise.all([
+        const [eMarkets, nMarkets, ncMarkets, nhMarkets] = await Promise.all([
           gamma.getEsportsMarkets(),
           gamma.getNbaMarkets(),
+          gamma.getNcaabMarkets(),
+          gamma.getNhlMarkets(),
         ]);
         esportsMarkets = eMarkets;
         nbaMarkets = nMarkets;
+        ncaabMarkets = ncMarkets;
+        nhlMarkets = nhMarkets;
 
         // Subscribe to WS price feeds for all markets
-        for (const m of [...esportsMarkets, ...nbaMarkets]) {
+        for (const m of [...esportsMarkets, ...nbaMarkets, ...ncaabMarkets, ...nhlMarkets]) {
           ws.subscribe(m.yesTokenId);
           ws.subscribe(m.noTokenId);
         }
 
         health.wsConnected = ws.isConnected();
-        console.log(`[Gamma] Refreshed markets: ${esportsMarkets.length} esports, ${nbaMarkets.length} NBA`);
+        console.log(`[Gamma] Refreshed: ${esportsMarkets.length} esports, ${nbaMarkets.length} NBA, ${ncaabMarkets.length} NCAAB, ${nhlMarkets.length} NHL`);
       } catch (err) {
         console.error('[Gamma] Scan error:', err);
       }
@@ -215,26 +271,8 @@ async function main() {
                 timestamp: Date.now(),
               };
 
-              // Update market prices from WS
-              const wsYes = ws.getLatestPrice(matchedMarket.yesTokenId);
-              const wsNo = ws.getLatestPrice(matchedMarket.noTokenId);
-              if (wsYes > 0) matchedMarket.yesPrice = wsYes;
-              if (wsNo > 0) matchedMarket.noPrice = wsNo;
-
-              // Log signal
-              db.logSignal(matchedMarket.id, signal, matchedMarket.yesPrice);
-
-              // Detect arbitrage
-              const opp = detector.detect(matchedMarket, signal);
-              if (!opp) continue;
-
-              // Risk check
-              if (!riskGuard.allow(opp)) {
-                console.log(`[Risk] Blocked trade on "${matchedMarket.question}" | edge=${(opp.edge * 100).toFixed(1)}%`);
-                continue;
-              }
-
-              await executeOpportunity(opp);
+              updateMarketPrices(matchedMarket);
+              await processSignal(matchedMarket, signal);
             } catch (frameErr) {
               console.error(`[Esports] Frame error for match ${match.id}:`, frameErr);
             }
@@ -248,65 +286,38 @@ async function main() {
   }
 
   // -----------------------------------------------------------------------
-  // 6c. NBA loop
+  // 6c. NBA loop — ESPN primary, logistic fallback, Pinnacle enrichment
   // -----------------------------------------------------------------------
   async function nbaLoop(): Promise<void> {
     while (running) {
       try {
-        const liveGames = await nbaClient.getLiveGames();
+        const liveGames = await espn.getLiveGames('nba');
 
         for (const game of liveGames) {
-          // Find corresponding Polymarket market
-          const matchedMarket = nbaMarkets.find((m) => {
-            // Create a LiveMatch-like object for matching
-            const liveMatch: LiveMatch = {
-              id: String(game.id),
-              game: 'lol' as Game, // MarketMatcher detects sport from question text
-              team1: game.home_team.abbreviation,
-              team2: game.visitor_team.abbreviation,
-              status: 'running',
-            };
-            return matcher.match(m, [liveMatch]) === liveMatch.id;
-          });
+          const matchedMarket = matchGameToMarket(game, nbaMarkets);
           if (!matchedMarket) continue;
 
-          // Get signal from BallDontLie
-          const signal = await nbaClient.getSignal(String(game.id));
-          if (!signal) continue;
+          // ESPN predictor as primary signal
+          let signal = await espn.getPredictor('nba', game.id);
 
-          // Try to enhance with Pinnacle sharp line
-          const pinnacleSignal = await pinnacle.getSignal(String(game.id), 'basketball_nba');
+          // Fallback to our logistic model
+          if (!signal) {
+            const prob = calcNbaWinProb({
+              scoreDiff: game.homeTeam.score - game.awayTeam.score,
+              period: game.period,
+              timeLeft: game.clock || '12:00',
+            }, true);
+            signal = { trueProb: prob, confidence: 0.70, source: 'nba-logistic', timestamp: Date.now() };
+          }
+
+          // Pinnacle enrichment
+          const pinnacleSignal = await pinnacle.getSignal(game.id, 'basketball_nba');
           if (pinnacleSignal) {
-            // Average the two probability sources weighted by confidence
-            const totalConf = signal.confidence + pinnacleSignal.confidence;
-            signal.trueProb =
-              (signal.trueProb * signal.confidence +
-                pinnacleSignal.trueProb * pinnacleSignal.confidence) /
-              totalConf;
-            signal.confidence = Math.min(0.95, (signal.confidence + pinnacleSignal.confidence) / 2 + 0.05);
-            signal.source = 'balldontlie+pinnacle';
+            signal = blendSignals(signal, pinnacleSignal);
           }
 
-          // Update market prices from WS
-          const wsYes = ws.getLatestPrice(matchedMarket.yesTokenId);
-          const wsNo = ws.getLatestPrice(matchedMarket.noTokenId);
-          if (wsYes > 0) matchedMarket.yesPrice = wsYes;
-          if (wsNo > 0) matchedMarket.noPrice = wsNo;
-
-          // Log signal
-          db.logSignal(matchedMarket.id, signal, matchedMarket.yesPrice);
-
-          // Detect arbitrage
-          const opp = detector.detect(matchedMarket, signal);
-          if (!opp) continue;
-
-          // Risk check
-          if (!riskGuard.allow(opp)) {
-            console.log(`[Risk] Blocked NBA trade on "${matchedMarket.question}" | edge=${(opp.edge * 100).toFixed(1)}%`);
-            continue;
-          }
-
-          await executeOpportunity(opp);
+          updateMarketPrices(matchedMarket);
+          await processSignal(matchedMarket, signal);
         }
       } catch (err) {
         console.error('[NBA] Poll error:', err);
@@ -316,7 +327,102 @@ async function main() {
   }
 
   // -----------------------------------------------------------------------
-  // 6d. Position manager loop
+  // 6d. NCAAB loop — ESPN primary, logistic fallback, Pinnacle enrichment
+  // -----------------------------------------------------------------------
+  async function ncaabLoop(): Promise<void> {
+    while (running) {
+      try {
+        const liveGames = await espn.getLiveGames('ncaab');
+
+        for (const game of liveGames) {
+          const matchedMarket = matchGameToMarket(game, ncaabMarkets);
+          if (!matchedMarket) continue;
+
+          // ESPN predictor as primary signal
+          let signal = await espn.getPredictor('ncaab', game.id);
+
+          // Fallback to our logistic model (2-half format)
+          if (!signal) {
+            const prob = calcNcaabWinProb({
+              scoreDiff: game.homeTeam.score - game.awayTeam.score,
+              half: game.period <= 1 ? 1 : 2,
+              timeLeft: game.clock || '20:00',
+            }, true);
+            signal = { trueProb: prob, confidence: 0.70, source: 'ncaab-logistic', timestamp: Date.now() };
+          }
+
+          // Pinnacle enrichment
+          const pinnacleSignal = await pinnacle.getSignal(game.id, 'basketball_ncaab');
+          if (pinnacleSignal) {
+            signal = blendSignals(signal, pinnacleSignal);
+          }
+
+          updateMarketPrices(matchedMarket);
+          await processSignal(matchedMarket, signal);
+        }
+      } catch (err) {
+        console.error('[NCAAB] Poll error:', err);
+      }
+      await Bun.sleep(CONFIG.ncaabPollMs);
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // 6e. NHL loop — ESPN primary, logistic fallback, NHL API PBP enrichment
+  // -----------------------------------------------------------------------
+  async function nhlLoop(): Promise<void> {
+    while (running) {
+      try {
+        const liveGames = await espn.getLiveGames('nhl');
+
+        for (const game of liveGames) {
+          const matchedMarket = matchGameToMarket(game, nhlMarkets);
+          if (!matchedMarket) continue;
+
+          // ESPN predictor as primary signal
+          let signal = await espn.getPredictor('nhl', game.id);
+
+          // Fallback to our logistic model with NHL API power play enrichment
+          if (!signal) {
+            let homePP = false;
+            let awayPP = false;
+
+            // Try to get power play state from NHL Official API
+            const pbp = await nhlClient.getPlayByPlay(game.id);
+            if (pbp) {
+              const ppState = nhlClient.detectPowerPlay(pbp.plays, pbp.homeTeamId);
+              homePP = ppState.homePP;
+              awayPP = ppState.awayPP;
+            }
+
+            const prob = calcNhlWinProb({
+              scoreDiff: game.homeTeam.score - game.awayTeam.score,
+              period: game.period,
+              timeLeft: game.clock || '20:00',
+              homePowerPlay: homePP,
+              awayPowerPlay: awayPP,
+            }, true);
+            signal = { trueProb: prob, confidence: 0.70, source: 'nhl-logistic', timestamp: Date.now() };
+          }
+
+          // Pinnacle enrichment
+          const pinnacleSignal = await pinnacle.getSignal(game.id, 'icehockey_nhl');
+          if (pinnacleSignal) {
+            signal = blendSignals(signal, pinnacleSignal);
+          }
+
+          updateMarketPrices(matchedMarket);
+          await processSignal(matchedMarket, signal);
+        }
+      } catch (err) {
+        console.error('[NHL] Poll error:', err);
+      }
+      await Bun.sleep(CONFIG.nhlPollMs);
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // 6f. Position manager loop
   // -----------------------------------------------------------------------
   async function positionLoop(): Promise<void> {
     while (running) {
@@ -385,6 +491,8 @@ async function main() {
     gammaScanLoop(),
     esportsLoop(),
     nbaLoop(),
+    ncaabLoop(),
+    nhlLoop(),
     positionLoop(),
   ]);
 }

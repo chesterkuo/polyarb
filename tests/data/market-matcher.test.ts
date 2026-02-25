@@ -18,6 +18,14 @@ const teamNames = {
     'LAL': ['Lakers', 'Los Angeles Lakers'],
     'BOS': ['Celtics', 'Boston Celtics'],
   },
+  ncaab: {
+    'DUKE': ['Duke', 'Duke Blue Devils'],
+    'UNC': ['North Carolina', 'UNC', 'Tar Heels'],
+  },
+  nhl: {
+    'BOS': ['Bruins', 'Boston Bruins'],
+    'TOR': ['Maple Leafs', 'Toronto Maple Leafs', 'Leafs'],
+  },
 };
 
 function makeMarket(overrides: Partial<Market> = {}): Market {
@@ -109,5 +117,32 @@ describe('MarketMatcher', () => {
       [makeMatch({ id: 'cs-match', game: 'cs2', team1: 'NaVi', team2: 'FaZe' })],
     );
     expect(result).toBe('cs-match');
+  });
+
+  it('detects NCAAB sport from question', () => {
+    const matcher = new MarketMatcher(teamNames);
+    const result = matcher.match(
+      makeMarket({ question: 'Will DUKE beat UNC in NCAA tournament?' }),
+      [makeMatch({ id: 'ncaa-match', game: undefined as any, team1: 'Duke', team2: 'UNC' })],
+    );
+    expect(result).toBe('ncaa-match');
+  });
+
+  it('detects NHL sport from question', () => {
+    const matcher = new MarketMatcher(teamNames);
+    const result = matcher.match(
+      makeMarket({ question: 'Will BOS beat TOR in NHL?' }),
+      [makeMatch({ id: 'nhl-match', game: undefined as any, team1: 'Bruins', team2: 'Leafs' })],
+    );
+    expect(result).toBe('nhl-match');
+  });
+
+  it('uses market.sport when set', () => {
+    const matcher = new MarketMatcher(teamNames);
+    const result = matcher.match(
+      makeMarket({ question: 'Will BOS beat TOR?', sport: 'nhl' }),
+      [makeMatch({ id: 'nhl-match', game: undefined as any, team1: 'Bruins', team2: 'Leafs' })],
+    );
+    expect(result).toBe('nhl-match');
   });
 });

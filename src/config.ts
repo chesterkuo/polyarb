@@ -23,13 +23,15 @@ export const CONFIG = {
   pandascoreKey: process.env.PANDASCORE_API_KEY ?? '',
   steamApiKey: process.env.STEAM_API_KEY ?? '',
   oddsApiKey: process.env.ODDS_API_KEY ?? '',
-  bdlApiKey: process.env.BDL_API_KEY ?? '',
   telegramToken: process.env.TELEGRAM_BOT_TOKEN ?? '',
   telegramChatId: process.env.TELEGRAM_CHAT_ID ?? '',
 
   esportsPollMs: 200,
   esportsFramePollMs: 3000,
   nbaPollMs: 1000,
+  ncaabPollMs: 2000,
+  nhlPollMs: 1000,
+  ncaaRateLimitMs: 200,
   gammaScanMs: 60_000,
   positionCheckMs: 2000,
 
