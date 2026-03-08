@@ -165,13 +165,37 @@ export class KalshiClient {
       const title = m.title.toLowerCase();
       const sub = m.yesSubTitle.toLowerCase();
       const text = title + ' ' + sub;
-      if ((text.includes(homeName) || text.includes(awayName)) &&
-          (text.includes(homeName) && text.includes(awayName))) {
+      if (text.includes(homeName) && text.includes(awayName)) {
         return m;
       }
     }
 
     return null;
+  }
+
+  /**
+   * Check if the YES side of a Kalshi market represents the away team.
+   * Kalshi ticker last segment = YES team abbreviation.
+   * Falls back to checking yesSubTitle and title text.
+   */
+  isYesAway(km: KalshiMarket, game: SportGame): boolean {
+    const awayAbbr = game.awayTeam.abbreviation.toUpperCase();
+    const awayName = game.awayTeam.name.toLowerCase();
+
+    // Check ticker last segment (most reliable)
+    const lastSeg = km.ticker.toUpperCase().split('-').pop() ?? '';
+    if (lastSeg === awayAbbr) return true;
+
+    // Check yesSubTitle
+    if (km.yesSubTitle.toLowerCase().includes(awayName)) return true;
+
+    // Check title: "Away at Home Winner?" — away team appears first
+    const title = km.title.toLowerCase();
+    const awayIdx = title.indexOf(awayName);
+    const homeIdx = title.indexOf(game.homeTeam.name.toLowerCase());
+    if (awayIdx >= 0 && homeIdx >= 0 && awayIdx < homeIdx) return true;
+
+    return false;
   }
 
   checkLiquidity(
@@ -210,15 +234,24 @@ export class KalshiClient {
     };
   }
 
-  toMarket(km: KalshiMarket, sport?: Sport): Market {
+  /**
+   * Convert a KalshiMarket to a normalized Market where YES = away team wins.
+   * If the Kalshi market has YES = home team, prices are swapped.
+   */
+  toMarket(km: KalshiMarket, sport?: Sport, game?: SportGame): Market {
+    // Determine if we need to swap: our convention is YES = away team
+    const needsSwap = game ? !this.isYesAway(km, game) : false;
+    const yesPrice = needsSwap ? km.noAsk / 100 : km.yesAsk / 100;
+    const noPrice = needsSwap ? km.yesAsk / 100 : km.noAsk / 100;
+
     return {
       id: km.ticker,
       conditionId: km.eventTicker,
       question: km.title,
       yesTokenId: km.ticker,
       noTokenId: km.ticker,
-      yesPrice: km.yesAsk / 100,
-      noPrice: km.noAsk / 100,
+      yesPrice,
+      noPrice,
       negRisk: false,
       tickSize: 0.01,
       sport,

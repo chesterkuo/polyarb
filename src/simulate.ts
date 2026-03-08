@@ -19,6 +19,7 @@ import { calcEdge, calcKellySize } from './signals/edge-calculator';
 import { calcNbaWinProb, calcNcaabWinProb } from './signals/wp-models/nba-wp';
 import { calcNhlWinProb } from './signals/wp-models/nhl-wp';
 import { parseClockToMinutes } from './signals/wp-models/parse-clock';
+import { isFuturesMarket, isGameMarket } from './signals/market-anchored-wp';
 import teamNamesData from '../data/team-names.json';
 
 // ─── Simulation constants ────────────────────────────────────────────────────
@@ -79,23 +80,16 @@ function generateSyntheticGames(): { nba: SportGame[]; ncaab: SportGame[]; nhl: 
   };
 }
 
-// ─── Match game to Polymarket market ────────────────────────────────────────
-const FUTURES_KEYWORDS = ['finals', 'championship', 'playoffs', 'make the', 'win the', 'mvp', 'award', 'season', 'conference'];
-
-function isFuturesMarket(question: string): boolean {
-  const q = question.toLowerCase();
-  return FUTURES_KEYWORDS.some(kw => q.includes(kw));
-}
-
+// ─── Match game to Polymarket market (futures filter + game check from market-anchored-wp) ──
 function findMarket(game: SportGame, markets: Market[]): Market | null {
   const hAbbr = game.homeTeam.abbreviation.toLowerCase();
   const aAbbr = game.awayTeam.abbreviation.toLowerCase();
   const hName = game.homeTeam.name.toLowerCase();
   const aName = game.awayTeam.name.toLowerCase();
 
-  // Only match head-to-head game markets (both teams present, not futures)
   for (const m of markets) {
     if (isFuturesMarket(m.question)) continue;
+    if (!isGameMarket(m.question)) continue;
     if (m.yesPrice <= 0.01 || m.yesPrice >= 0.99) continue;
     const q = m.question.toLowerCase();
     const homeMatch = q.includes(hName) || q.includes(hAbbr);
@@ -221,7 +215,7 @@ async function simulate() {
         const { side, edge } = calcEdge(sig.trueProb, market.yesPrice, market.noPrice);
         edgeStr = `${side} edge=${(edge * 100).toFixed(1)}%${edge >= MIN_EDGE ? ' !!!' : ''}`;
       }
-      console.log(`    ${g.sport.toUpperCase().padEnd(5)} | ${g.awayTeam.abbreviation} ${g.awayTeam.score} @ ${g.homeTeam.abbreviation} ${g.homeTeam.score} | P${g.period} ${g.clock} | homeWP=${(sig.trueProb * 100).toFixed(1)}% | ${edgeStr}`);
+      console.log(`    ${g.sport.toUpperCase().padEnd(5)} | ${g.awayTeam.abbreviation} ${g.awayTeam.score} @ ${g.homeTeam.abbreviation} ${g.homeTeam.score} | P${g.period} ${g.clock} | yesProb=${(sig.trueProb * 100).toFixed(1)}% | ${edgeStr}`);
     }
   }
 
@@ -266,7 +260,7 @@ function processGames(
     const signal = computeSignal(game);
     const market = findMarket(game, markets);
 
-    console.log(`    ${label} | ${game.awayTeam.abbreviation} ${String(game.awayTeam.score).padStart(3)} @ ${game.homeTeam.abbreviation} ${String(game.homeTeam.score).padStart(3)} | P${game.period} ${game.clock.padEnd(5)} | homeWP=${(signal.trueProb * 100).toFixed(1).padStart(5)}% | ${signal.source}`);
+    console.log(`    ${label} | ${game.awayTeam.abbreviation} ${String(game.awayTeam.score).padStart(3)} @ ${game.homeTeam.abbreviation} ${String(game.homeTeam.score).padStart(3)} | P${game.period} ${game.clock.padEnd(5)} | yesProb=${(signal.trueProb * 100).toFixed(1).padStart(5)}% | ${signal.source}`);
 
     if (!market) {
       console.log(`           No matching market`);

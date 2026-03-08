@@ -12,7 +12,7 @@ import { GammaScanner } from './data/polymarket-gamma';
 import { EspnClient } from './data/espn/espn-client';
 import { PinnacleClient } from './data/pinnacle-client';
 import { calcEdge } from './signals/edge-calculator';
-import { calcNbaWinProb } from './signals/wp-models/nba-wp';
+import { computeAnchoredSignal, isFuturesMarket, isGameMarket } from './signals/market-anchored-wp';
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 const STARTING_BALANCE = 50;
@@ -21,6 +21,7 @@ const KELLY_FRACTION   = 0.25;
 const MIN_EDGE         = CONFIG.minEdge;
 const POLL_INTERVAL_MS = 2 * 60 * 1000;   // Poll every 2 minutes
 const COOLDOWN_MS      = POLL_INTERVAL_MS; // One trade per market per poll cycle
+const MAX_PRICE        = 0.78;             // Don't buy above $0.78 — poor risk/reward
 const MAX_POLLS        = 90;               // Run for up to 3 hours
 const LOG_FILE         = 'data/logs/sim-' + new Date().toISOString().split('T')[0] + '.log';
 
@@ -131,31 +132,19 @@ async function run() {
         log(`─── Poll #${poll} | ${liveGames.length} live game(s) ───`);
 
         for (const game of liveGames) {
-          const diff = game.homeTeam.score - game.awayTeam.score;
-          const prob = calcNbaWinProb({
-            scoreDiff: diff,
-            period: game.period,
-            timeLeft: game.clock || '12:00',
-          }, true);
-
-          // Try ESPN predictor
-          let signal: Signal;
-          const predictor = await espn.getPredictor('nba', game.id);
-          if (predictor) {
-            signal = predictor;
-          } else {
-            signal = { trueProb: prob, confidence: 0.70, source: 'nba-logistic', timestamp: Date.now() };
-          }
-
-          const gameStr = `${game.awayTeam.abbreviation} ${game.awayTeam.score} @ ${game.homeTeam.abbreviation} ${game.homeTeam.score} Q${game.period} ${game.clock}`;
-          log(`  ${gameStr} | homeWP=${(signal.trueProb * 100).toFixed(1)}% [${signal.source}]`);
-
-          // Find matching market
+          // Find matching market FIRST so we can anchor signal to market price
           const market = findGameMarket(game, pricedMarkets);
           if (!market) {
-            log(`    No matching market`);
+            const gameStr = `${game.awayTeam.abbreviation} ${game.awayTeam.score} @ ${game.homeTeam.abbreviation} ${game.homeTeam.score} Q${game.period} ${game.clock}`;
+            log(`  ${gameStr} | No matching market`);
             continue;
           }
+
+          const predictor = await espn.getPredictor('nba', game.id);
+          const signal = computeAnchoredSignal(game, market.yesPrice, predictor);
+
+          const gameStr = `${game.awayTeam.abbreviation} ${game.awayTeam.score} @ ${game.homeTeam.abbreviation} ${game.homeTeam.score} Q${game.period} ${game.clock}`;
+          log(`  ${gameStr} | yesProb=${(signal.trueProb * 100).toFixed(1)}% [${signal.source}]`);
 
           const { side, edge } = calcEdge(signal.trueProb, market.yesPrice, market.noPrice);
           const price = side === 'YES' ? market.yesPrice : market.noPrice;
@@ -169,7 +158,9 @@ async function run() {
           const lastTrade = cooldowns.get(market.id) ?? 0;
           const cooledDown = Date.now() - lastTrade > COOLDOWN_MS;
 
-          if (edge >= MIN_EDGE && size >= 2 && cooledDown && totalExposure + size <= balance) {
+          if (price > MAX_PRICE) {
+            log(`    --- Price too high ($${price.toFixed(2)} > $${MAX_PRICE}) — poor risk/reward`);
+          } else if (edge >= MIN_EDGE && size >= 2 && cooledDown && totalExposure + size <= balance) {
             trades.push({
               poll, time: new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York' }),
               game: gameStr, market: market.question, side, price, sizeUsd: size,
@@ -260,23 +251,16 @@ async function run() {
   console.log(`Log saved to: ${LOG_FILE}`);
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-const FUTURES_KEYWORDS = ['finals', 'championship', 'playoffs', 'make the', 'win the', 'mvp', 'award', 'season', 'conference'];
-
-function isFuturesMarket(question: string): boolean {
-  const q = question.toLowerCase();
-  return FUTURES_KEYWORDS.some(kw => q.includes(kw));
-}
-
+// ─── Helpers (futures filter + game check imported from market-anchored-wp) ──
 function findGameMarket(game: SportGame, markets: Market[]): Market | null {
   const hName = game.homeTeam.name.toLowerCase();
   const aName = game.awayTeam.name.toLowerCase();
   const hAbbr = game.homeTeam.abbreviation.toLowerCase();
   const aAbbr = game.awayTeam.abbreviation.toLowerCase();
 
-  // Only match head-to-head game markets (both teams present, not futures)
   for (const m of markets) {
     if (isFuturesMarket(m.question)) continue;
+    if (!isGameMarket(m.question)) continue;
     const q = m.question.toLowerCase();
     if ((q.includes(hName) || q.includes(hAbbr)) &&
         (q.includes(aName) || q.includes(aAbbr))) {

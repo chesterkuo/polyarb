@@ -12,9 +12,7 @@ import type { Market, Signal, Side, Sport, SportGame } from './types';
 import { KalshiClient, type KalshiMarket, type KalshiOrderBook } from './data/kalshi/kalshi-client';
 import { EspnClient } from './data/espn/espn-client';
 import { calcEdge } from './signals/edge-calculator';
-import { calcNbaWinProb, calcNcaabWinProb } from './signals/wp-models/nba-wp';
-import { calcNhlWinProb } from './signals/wp-models/nhl-wp';
-import { parseClockToMinutes } from './signals/wp-models/parse-clock';
+import { computeAnchoredSignal } from './signals/market-anchored-wp';
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 const STARTING_BALANCE = 50;
@@ -24,6 +22,9 @@ const MIN_EDGE         = CONFIG.minEdge;
 const POLL_INTERVAL_MS = 2 * 60 * 1000;
 const COOLDOWN_MS      = 5 * 60 * 1000;   // 5 min cooldown per market
 const MAX_PER_MARKET   = 15;               // Max $15 per market (diversification)
+const MAX_YES_PRICE    = 0.65;             // YES risk/reward poor above $0.65 (max payout 1.54x)
+const MAX_NO_PRICE     = 0.70;             // NO risk/reward poor above $0.70 (max payout 1.43x)
+const MIN_EDGE_HIGH    = 0.12;             // 12% min edge when price > $0.65
 const MAX_POLLS        = 120;
 const LOG_FILE         = 'data/logs/live-sim-' + new Date().toISOString().replace(/[:.]/g, '-') + '.log';
 
@@ -70,35 +71,8 @@ function truncate(s: string, len: number): string {
 }
 
 // ─── Signal computation ──────────────────────────────────────────────────────
-function computeSignal(game: SportGame, espnSignal: Signal | null): Signal {
-  if (espnSignal) return espnSignal;
-
-  const diff = game.homeTeam.score - game.awayTeam.score;
-
-  if (game.sport === 'ncaab') {
-    const prob = calcNcaabWinProb({
-      scoreDiff: diff,
-      half: game.period <= 1 ? 1 : 2,
-      timeLeft: game.clock || '20:00',
-    }, true);
-    return { trueProb: prob, confidence: 0.70, source: 'ncaab-logistic', timestamp: Date.now() };
-  }
-
-  if (game.sport === 'nhl') {
-    const prob = calcNhlWinProb({
-      scoreDiff: diff,
-      period: game.period,
-      timeLeft: game.clock || '20:00',
-    }, true);
-    return { trueProb: prob, confidence: 0.70, source: 'nhl-logistic', timestamp: Date.now() };
-  }
-
-  const prob = calcNbaWinProb({
-    scoreDiff: diff,
-    period: game.period,
-    timeLeft: game.clock || '12:00',
-  }, true);
-  return { trueProb: prob, confidence: 0.70, source: 'nba-logistic', timestamp: Date.now() };
+function computeSignal(game: SportGame, marketPrice: number, espnSignal: Signal | null): Signal {
+  return computeAnchoredSignal(game, marketPrice, espnSignal);
 }
 
 // ─── Main loop ───────────────────────────────────────────────────────────────
@@ -183,24 +157,24 @@ async function run() {
         ];
 
         for (const { game, sport, sportLabel } of allGames) {
-          // Get ESPN predictor, fall back to logistic model
-          const predictor = await espn.getPredictor(game.sport, game.id);
-          const signal = computeSignal(game, predictor);
-
-          const periodLabel = game.sport === 'ncaab' ? `H${game.period}` : game.sport === 'nhl' ? `P${game.period}` : `Q${game.period}`;
-          const gameStr = `${game.awayTeam.abbreviation} ${game.awayTeam.score} @ ${game.homeTeam.abbreviation} ${game.homeTeam.score} ${periodLabel} ${game.clock}`;
-          log(`  ${sportLabel} | ${gameStr} | homeWP=${(signal.trueProb * 100).toFixed(1)}% [${signal.source}]`);
-
-          // Find matching Kalshi market
+          // Match market FIRST so we can anchor signal to market price
           const sportMarkets = kalshiMarkets.find(s => s.sport === sport)?.markets ?? [];
           const km = kalshi.matchGameToMarket(game, sportMarkets);
           if (!km) {
-            log(`    No matching Kalshi market`);
+            const periodLabel = game.sport === 'ncaab' ? `H${game.period}` : game.sport === 'nhl' ? `P${game.period}` : `Q${game.period}`;
+            log(`  ${sportLabel} | ${game.awayTeam.abbreviation} ${game.awayTeam.score} @ ${game.homeTeam.abbreviation} ${game.homeTeam.score} ${periodLabel} ${game.clock} | No Kalshi market`);
             continue;
           }
 
           // Convert to Market type for edge calculation
-          const market = kalshi.toMarket(km, sport);
+          const market = kalshi.toMarket(km, sport, game);
+
+          const predictor = await espn.getPredictor(game.sport, game.id);
+          const signal = computeSignal(game, market.yesPrice, predictor);
+
+          const periodLabel = game.sport === 'ncaab' ? `H${game.period}` : game.sport === 'nhl' ? `P${game.period}` : `Q${game.period}`;
+          const gameStr = `${game.awayTeam.abbreviation} ${game.awayTeam.score} @ ${game.homeTeam.abbreviation} ${game.homeTeam.score} ${periodLabel} ${game.clock}`;
+          log(`  ${sportLabel} | ${gameStr} | yesProb=${(signal.trueProb * 100).toFixed(1)}% [${signal.source}]`);
 
           const { side, edge } = calcEdge(signal.trueProb, market.yesPrice, market.noPrice);
           const price = side === 'YES' ? market.yesPrice : market.noPrice;
@@ -218,7 +192,13 @@ async function run() {
           const mktExp = marketExposure.get(market.id) ?? 0;
           const withinMarketCap = mktExp + size <= MAX_PER_MARKET;
 
-          if (edge >= MIN_EDGE && size >= 2 && cooledDown && withinMarketCap && totalExposure + size <= balance) {
+          const maxPrice = side === 'YES' ? MAX_YES_PRICE : MAX_NO_PRICE;
+          const reqEdge = price > 0.65 ? MIN_EDGE_HIGH : MIN_EDGE;
+          if (price > maxPrice) {
+            log(`    --- Price too high ($${price.toFixed(2)} > $${maxPrice} ${side}) — poor risk/reward`);
+          } else if (edge < reqEdge) {
+            log(`    --- Edge too small (${(edge * 100).toFixed(1)}% < ${(reqEdge * 100).toFixed(0)}%)`);
+          } else if (edge >= reqEdge && size >= 2 && cooledDown && withinMarketCap && totalExposure + size <= balance) {
             // Check orderbook liquidity before executing
             const ob = await kalshi.getOrderBook(km.ticker);
             let liqInfo: SimTrade['liquidity'];
@@ -248,8 +228,6 @@ async function run() {
             log(`    --- Cooldown (${Math.round((COOLDOWN_MS - (Date.now() - lastTrade)) / 1000)}s left)`);
           } else if (!withinMarketCap) {
             log(`    --- Market cap reached ($${mktExp.toFixed(2)}/$${MAX_PER_MARKET})`);
-          } else if (edge < MIN_EDGE) {
-            log(`    --- Edge too small (${(edge * 100).toFixed(1)}% < ${(MIN_EDGE * 100).toFixed(0)}%)`);
           } else {
             log(`    --- Size too small or insufficient balance`);
           }
